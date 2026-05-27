@@ -1,0 +1,14 @@
+{
+  "name": "terragrunt-plugin",
+  "owner": {
+    "name": "Anthony Allen"
+  },
+  "description": "Comprehensive Terragrunt skill plugin for Claude Code",
+  "plugins": [
+    {
+      "name": "terragrunt",
+      "source": ".",
+      "description": "Comprehensive Terragrunt guide for infrastructure-as-code with OpenTofu/Terraform"
+    }
+  ]
+}
