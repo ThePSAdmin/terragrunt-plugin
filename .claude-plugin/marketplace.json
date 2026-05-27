@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "terragrunt",
-      "source": ".",
+      "source": "./",
       "description": "Comprehensive Terragrunt guide for infrastructure-as-code with OpenTofu/Terraform"
     }
   ]
