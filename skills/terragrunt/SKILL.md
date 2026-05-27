@@ -4,9 +4,10 @@ description: >-
   Comprehensive Terragrunt guide for infrastructure-as-code with OpenTofu/Terraform.
   Use this skill whenever the user mentions Terragrunt, works with terragrunt.hcl files,
   asks about DRY Terraform/OpenTofu patterns, multi-environment infrastructure deployment,
-  infrastructure-live or infrastructure-modules repositories, terragrunt run/plan/apply,
-  remote state management with Terragrunt, cross-unit dependencies, dependency blocks,
-  include blocks, stacks (implicit or explicit), terragrunt.stack.hcl files, mock_outputs,
+  infrastructure-live or infrastructure-modules or infrastructure-catalog repositories,
+  terragrunt run/plan/apply, remote state management with Terragrunt, cross-unit
+  dependencies, dependency blocks, include blocks, stacks (implicit or explicit),
+  terragrunt.stack.hcl files, mock_outputs, the values interface, catalog units,
   multi-account AWS/GCP/Azure deployment with Terragrunt, Terragrunt GitHub Actions,
   Terragrunt CLI commands, or any Terragrunt-specific HCL configuration. Also trigger
   when the user references DRY infrastructure patterns, wants to orchestrate multiple
@@ -78,9 +79,108 @@ Read `references/debugging-and-observability.md`
 
 ## Quick-Start Patterns
 
-### Basic Unit
+### Stacks-Based Project (Recommended)
 
-A minimal `terragrunt.hcl` that includes a root config and deploys a module:
+The preferred way to structure Terragrunt is with explicit stacks and a catalog. The infrastructure-live repo contains `terragrunt.stack.hcl` files that source units from an infrastructure-catalog repo:
+
+```hcl
+# infrastructure-live/prod/us-east-1/my-service/terragrunt.stack.hcl
+
+locals {
+  account_vars = read_terragrunt_config(find_in_parent_folders("account.hcl"))
+  region_vars  = read_terragrunt_config(find_in_parent_folders("region.hcl"))
+  name         = "my-service"
+}
+
+unit "vpc" {
+  source = "github.com/acme/infrastructure-catalog//units/vpc?ref=v1.0.0"
+  path   = "vpc"
+  values = {
+    version    = "v1.0.0"
+    name       = "${local.name}-vpc"
+    cidr_block = "10.0.0.0/16"
+    aws_region = local.region_vars.locals.aws_region
+  }
+}
+
+unit "database" {
+  source = "github.com/acme/infrastructure-catalog//units/rds?ref=v1.0.0"
+  path   = "database"
+  values = {
+    version  = "v1.0.0"
+    name     = local.name
+    engine   = "postgres"
+    vpc_path = "../vpc"
+  }
+}
+
+unit "app" {
+  source = "github.com/acme/infrastructure-catalog//units/ecs-service?ref=v1.0.0"
+  path   = "app"
+  values = {
+    version       = "v1.0.0"
+    name          = local.name
+    vpc_path      = "../vpc"
+    database_path = "../database"
+  }
+}
+```
+
+A catalog unit uses `values.*` to receive configuration and `dependency` blocks with paths from values:
+
+```hcl
+# infrastructure-catalog/units/rds/terragrunt.hcl
+
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+dependency "vpc" {
+  config_path = values.vpc_path
+  mock_outputs = {
+    vpc_id          = "mock-vpc-id"
+    private_subnets = ["mock-subnet-1"]
+  }
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}
+
+terraform {
+  source = "github.com/acme/infrastructure-catalog//modules/database/rds?ref=${values.version}"
+}
+
+inputs = {
+  name      = values.name
+  engine    = try(values.engine, "postgres")
+  vpc_id    = dependency.vpc.outputs.vpc_id
+  subnet_id = dependency.vpc.outputs.private_subnets[0]
+}
+```
+
+### Stack Operations
+
+```bash
+# Generate units from stack definition
+terragrunt stack generate
+
+# Plan all generated units
+terragrunt run --all plan
+
+# Apply all units respecting dependency order
+terragrunt run --all apply
+
+# Destroy in reverse dependency order
+terragrunt run --all destroy
+
+# Run only units matching a filter
+terragrunt run --all --filter './prod/**' -- plan
+
+# Get aggregated stack outputs
+terragrunt stack output
+```
+
+### Basic Unit (Without Stacks)
+
+A minimal standalone `terragrunt.hcl` for simpler setups:
 
 ```hcl
 include "root" {
@@ -128,53 +228,6 @@ EOF
 }
 ```
 
-### Dependency Between Units
-
-A unit that depends on a VPC unit and uses its outputs:
-
-```hcl
-include "root" {
-  path = find_in_parent_folders("root.hcl")
-}
-
-dependency "vpc" {
-  config_path = "../vpc"
-  mock_outputs = {
-    vpc_id          = "mock-vpc-id"
-    private_subnets = ["mock-subnet-1"]
-  }
-  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
-}
-
-terraform {
-  source = "git::git@github.com:acme/modules.git//database/rds?ref=v1.0.0"
-}
-
-inputs = {
-  vpc_id    = dependency.vpc.outputs.vpc_id
-  subnet_id = dependency.vpc.outputs.private_subnets[0]
-}
-```
-
-### Stack Operations
-
-```bash
-# Plan all units in the current directory tree
-terragrunt run --all plan
-
-# Apply all units respecting dependency order
-terragrunt run --all apply
-
-# Destroy in reverse dependency order
-terragrunt run --all destroy
-
-# Run only units matching a filter
-terragrunt run --all --filter './prod/**' -- plan
-
-# Plan a single unit
-terragrunt run plan
-```
-
 ## Common Mistakes
 
 1. **Using `terragrunt.hcl` as root config name** — Use `root.hcl` instead. A file named `terragrunt.hcl` at the repo root is ambiguous (is it a unit or root config?).
@@ -191,55 +244,52 @@ terragrunt run plan
 
 7. **Not adding `.terragrunt-cache` and `.terragrunt-stack` to `.gitignore`** — These directories contain downloaded modules and generated stack files and should never be committed.
 
-## Recommended Repo Layout
+## Recommended Repo Layout (Stacks + Catalog)
 
 ```
-infrastructure-live/                  # Terragrunt configurations
+infrastructure-live/                  # Stacks that define deployed infrastructure
 ├── root.hcl                          # Shared root config (remote state, provider)
-├── _env/                             # Shared environment configs for includes
-│   ├── app.hcl
-│   └── database.hcl
-├── dev/
-│   ├── us-east-1/
-│   │   ├── vpc/terragrunt.hcl
-│   │   ├── app/terragrunt.hcl
-│   │   └── database/terragrunt.hcl
-│   └── region.hcl
-├── staging/
+├── non-prod/
+│   ├── account.hcl                   # Account name, account ID
 │   └── us-east-1/
-│       ├── vpc/terragrunt.hcl
-│       ├── app/terragrunt.hcl
-│       └── database/terragrunt.hcl
-└── prod/
-    └── us-east-1/
-        ├── vpc/terragrunt.hcl
-        ├── app/terragrunt.hcl
-        └── database/terragrunt.hcl
+│       ├── region.hcl               # AWS region
+│       └── my-service/
+│           └── terragrunt.stack.hcl  # Stack sourcing units from catalog
+├── prod/
+│   ├── account.hcl
+│   └── us-east-1/
+│       ├── region.hcl
+│       └── my-service/
+│           └── terragrunt.stack.hcl  # Same structure, different values
+└── .gitignore                        # Must include .terragrunt-stack/
 
-infrastructure-modules/               # Reusable OpenTofu/Terraform modules
-├── networking/vpc/
-│   ├── main.tf
-│   ├── variables.tf
-│   └── outputs.tf
-├── app/
-│   ├── main.tf
-│   ├── variables.tf
-│   └── outputs.tf
-└── database/rds/
-    ├── main.tf
-    ├── variables.tf
-    └── outputs.tf
+infrastructure-catalog/               # Reusable modules, units, and stacks
+├── modules/                          # Pure OpenTofu/Terraform modules
+│   ├── networking/vpc/
+│   ├── database/rds/
+│   └── app/ecs-service/
+├── units/                            # Terragrunt units wrapping modules
+│   ├── vpc/terragrunt.hcl           # Uses values.* interface
+│   ├── rds/terragrunt.hcl
+│   └── ecs-service/terragrunt.hcl
+├── stacks/                           # Reusable stack compositions (optional)
+│   └── web-service/
+│       └── terragrunt.stack.hcl
+├── root.hcl                          # Root config for catalog units
+└── examples/                         # Usage examples and tests
 ```
+
+For simpler setups without a catalog, the traditional two-repo implicit stacks pattern still works. See `references/repository-structure.md` for both approaches.
 
 ## References
 
-- **`references/repository-structure.md`** — Two-repo pattern, directory layout, multi-account and multi-environment patterns, DRY include chains. Read when setting up or restructuring a Terragrunt project.
+- **`references/repository-structure.md`** — Stacks + catalog pattern (recommended), traditional two-repo pattern, directory layout, multi-account and multi-environment patterns, DRY include chains. Read when setting up or restructuring a Terragrunt project.
 
 - **`references/hcl-configuration.md`** — Complete reference for all HCL blocks (`terraform`, `remote_state`, `include`, `locals`, `generate`, `feature`, `exclude`, `errors`) and top-level attributes (`inputs`, `prevent_destroy`, `iam_role`, etc.). Read when writing or debugging `terragrunt.hcl` files.
 
 - **`references/functions.md`** — All 25+ built-in functions with signatures, parameters, and examples. Read when you need `find_in_parent_folders`, `get_env`, `run_cmd`, `read_terragrunt_config`, `sops_decrypt_file`, `deep_merge`, AWS identity functions, or any other Terragrunt function.
 
-- **`references/stacks.md`** — Implicit stacks (directory-based) vs explicit stacks (`terragrunt.stack.hcl`), choosing between them, stack outputs, CAS integration, nested stacks, limitations. Read when orchestrating multiple units as a group.
+- **`references/stacks.md`** — Explicit stacks with catalogs (recommended), implicit stacks (directory-based), the values interface, stack outputs, dependencies in stacks, CAS integration, nested stacks, migration guide, limitations. Read when orchestrating multiple units as a group.
 
 - **`references/dependencies-and-includes.md`** — `dependency` and `dependencies` blocks, mock outputs, passing outputs between units, multiple includes, exposed includes, merge strategies. Read when connecting units together or setting up DRY include hierarchies.
 
