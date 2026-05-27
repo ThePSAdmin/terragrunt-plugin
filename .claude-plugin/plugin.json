@@ -1,0 +1,8 @@
+{
+  "name": "terragrunt",
+  "description": "Comprehensive Terragrunt guide for infrastructure-as-code with OpenTofu/Terraform. Covers HCL configuration, stacks, dependencies, remote state, CLI commands, GitHub Actions CI/CD, and repository structure best practices.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Anthony Allen"
+  }
+}
